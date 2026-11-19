@@ -90,7 +90,7 @@ generation assign identical ids.
 ## Setup
 
 The example is self-contained: it does **not** import `trainite.*` at runtime.
-PyTorch, PyTorch-Ignite, Accelerate, TensorBoard, and W&B are used.
+PyTorch, PyTorch-Ignite, TensorBoard, and W&B are used.
 
 Using the existing environment:
 
