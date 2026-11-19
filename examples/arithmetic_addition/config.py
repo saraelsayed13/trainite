@@ -38,7 +38,7 @@ class OptimizerConfig(BaseModel):
 
 class LossConfig(BaseModel):
     model_config = ConfigDict(extra="allow", validate_assignment=True)
-    target: str = Field(alias="_target_", default="models.causal_lm.CausalLMCrossEntropyLoss")
+    target: str = Field(alias="_target_", default="models.rope_transformer.CausalLMCrossEntropyLoss")
     ignore_index: int = -100
 
 

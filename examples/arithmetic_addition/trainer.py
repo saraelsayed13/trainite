@@ -355,7 +355,7 @@ class Trainer:
 
         step = self.best_iteration or self.trainer.state.iteration
         epoch = self.best_epoch or self.trainer.state.epoch
-        collate_fn_target = self.config.model.collate_fn_target or "models.causal_lm.CausalLMCollateFn"
+        collate_fn_target = self.config.model.collate_fn_target or "models.rope_transformer.CausalLMCollateFn"
 
         metrics: dict[str, float] = {
             "progress/epoch": float(epoch),

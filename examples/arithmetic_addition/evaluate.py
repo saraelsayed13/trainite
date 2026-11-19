@@ -236,7 +236,7 @@ def main() -> None:
         metrics["eval/best_val_loss"] = float(best_val_loss)
 
     max_new_tokens = config.trainer.max_inference_new_tokens
-    collate_fn_target = config.model.collate_fn_target or "models.causal_lm.CausalLMCollateFn"
+    collate_fn_target = config.model.collate_fn_target or "models.rope_transformer.CausalLMCollateFn"
 
     for prefix, label, split_config in (
         ("eval/id", "validation (ID)", config.data.val),

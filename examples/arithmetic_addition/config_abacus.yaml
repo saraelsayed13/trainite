@@ -4,7 +4,7 @@ preprocessor:
   charset: 0123456789+
 model:
   _target_: models.abacus_transformer.AbacusTransformerModel
-  collate_fn_target: models.causal_lm.CausalLMCollateFn
+  collate_fn_target: models.abacus_transformer.CausalLMCollateFn
   hidden_size: 128
   num_layers: 8
   num_heads: 4
@@ -18,7 +18,7 @@ optimizer:
   _target_: torch.optim.AdamW
   lr: 0.001
 loss:
-  _target_: models.causal_lm.CausalLMCrossEntropyLoss
+  _target_: models.abacus_transformer.CausalLMCrossEntropyLoss
   ignore_index: -100
 data:
   train:
