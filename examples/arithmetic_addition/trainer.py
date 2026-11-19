@@ -35,25 +35,6 @@ from utils import (
 
 
 def _flatten(output: dict[str, torch.Tensor], ignore_index: int = -100) -> tuple[torch.Tensor, torch.Tensor]:
-    """Reshape model output from (B, S, vocab) -> (B*S, vocab) and apply the ignore mask.
-
-    PyTorch's ``CrossEntropyLoss`` and Ignite's ``Loss``/``Accuracy`` metrics
-    expect a flat prediction tensor of shape (N, C) and a flat target tensor of
-    shape (N,).  This helper:
-
-    1. Flattens the logits and targets across the batch and sequence dimensions.
-    2. Filters out positions where the target equals ``ignore_index`` (i.e. padding
-       and prompt positions that should not contribute to the loss).
-
-    Args:
-        output: Dictionary with keys ``"logits"`` (B, S, vocab_size) and
-                ``"targets"`` (B, S).
-        ignore_index: Label value to exclude from metrics (default: -100, which
-                      is PyTorch's default ``CrossEntropyLoss.ignore_index``).
-
-    Returns:
-        Tuple of (filtered_logits, filtered_targets) ready for loss/accuracy metrics.
-    """
     logits = output["logits"].reshape(-1, output["logits"].size(-1))
     targets = output["targets"].reshape(-1)
     # Build a boolean mask that is True for every non-ignored position
@@ -62,33 +43,6 @@ def _flatten(output: dict[str, torch.Tensor], ignore_index: int = -100) -> tuple
 
 
 class Trainer:
-    """High-level training orchestrator for decoder-only language models.
-
-    This class wires together PyTorch-Ignite engines and Ignite `idist`
-    for scalable, hardware-agnostic training:
-
-    * **Hardware & Distributed (Ignite `idist`)** – handles device placement (CUDA/MPS/CPU),
-      multi-GPU Distributed Data Parallel (DDP), and Automatic Mixed Precision (AMP:
-      ``float32``, ``fp16``, ``bf16``) without boilerplate.
-    * **Engines (Ignite)** – ``self.trainer`` runs the training loop; ``self.train_evaluator``,
-      ``self.val_evaluator``, and ``self.test_evaluator`` run evaluation.
-    * **Metrics** – loss and token-accuracy are attached to each evaluator.
-    * **Learning-rate schedule** – linear warm-up + linear decay.
-    * **Checkpointing** – last and best-model checkpoints saved to ``run_dir``.
-    * **Early stopping** – halts training when validation loss stagnates.
-    * **Experiment logging** – TensorBoard or ClearML depending on ``config.logger``.
-    * **Inference logging** – optional qualitative sample generation every N epochs.
-
-    Typical usage::
-
-        config = load_config("config.yaml", ProjectConfig)
-        trainer = Trainer(config)
-        trainer.run()
-
-    References:
-    * PyTorch-Ignite: https://pytorch-ignite.ai/concepts/
-    * PyTorch-Ignite distributed: https://pytorch-ignite.ai/concepts/
-    """
 
     def __init__(self, config: ProjectConfig) -> None:
         self.logger: logging.Logger = setup_logger("trainer", level=logging.INFO)
@@ -100,7 +54,6 @@ class Trainer:
 
         # Device placement via Ignite's distributed helper
         self.device = idist.device() if config.device is None else config.device
-
 
         # Build tokenizer from config (e.g. CharTokenizer)
         self.tokenizer = instantiate(config.preprocessor)
@@ -133,14 +86,11 @@ class Trainer:
         self.test_evaluator = Engine(self._eval_step)
         self.metrics: dict = self._attach_metrics()
 
-        # Track the validation epoch that produced the best checkpoint, so the
-        # final evaluation is logged at the correct epoch/global step.
         self.best_val_loss = float("inf")
         self.best_epoch = 0
         self.best_iteration = 0
         self.val_evaluator.add_event_handler(Events.COMPLETED, self._track_best)
 
-        # Run evaluations at the end of each epoch to log training and validation metrics
         self.trainer.add_event_handler(Events.EPOCH_COMPLETED, self._run_evaluations)
 
         # Create run directory on rank 0 and broadcast to all ranks
@@ -163,15 +113,9 @@ class Trainer:
             loss = engine_val.state.metrics["loss"]
             return -loss
 
-        # Only training/validation metrics are auto-logged per epoch.  The test
-        # set is evaluated once against the best checkpoint at the end, so its
-        # metrics are logged at the best checkpoint's step rather than the final
-        # training step.
         evaluators = {"training": self.train_evaluator, "validation": self.val_evaluator}
         logging_kwargs = {
             "trainer": self.trainer,
-            # Learning rate is logged explicitly at epoch end to keep the tag
-            # identical in TensorBoard and W&B (training/learning_rate).
             "optimizers": None,
             "evaluators": evaluators,
             "log_every_iters": self.trainer_config.log_every_steps,
@@ -209,7 +153,6 @@ class Trainer:
         # Setup save handler and checkpointing on main process only
         if idist.get_rank() == 0:
             if config.logger == "clearml":
-                # Keep local checkpoints in run_dir; ClearML uses its configured output_uri for optional uploads.
                 save_handler = ClearMLSaver(
                     logger=self.exp_logger,
                     dirname=str(self.run_dir),
@@ -219,7 +162,6 @@ class Trainer:
             else:
                 save_handler = DiskSaver(dirname=str(self.run_dir), require_empty=False)
 
-            # Unwrap model before checkpointing to save clean weights without distributed ('module.') prefixes
             unwrapped_model: torch.nn.Module = self.model
             self.best_checkpoint = setup_best_model_checkpoint(
                 self.trainer,
@@ -242,7 +184,6 @@ class Trainer:
             self.attach_inference_logger()
 
     def _track_best(self, engine: Engine) -> None:
-        """Remember which validation epoch produced the best checkpoint."""
         loss = float(engine.state.metrics["loss"])
         if loss < self.best_val_loss:
             self.best_val_loss = loss
@@ -250,7 +191,6 @@ class Trainer:
             self.best_iteration = self.trainer.state.iteration
 
     def _log_scalars(self, metrics: dict[str, float], step: int) -> None:
-        """Write the same scalar values to TensorBoard (or ClearML) and W&B."""
         clean = {key: float(value) for key, value in metrics.items() if value is not None}
         if not clean:
             return
@@ -265,10 +205,6 @@ class Trainer:
             try:
                 self.wandb_logger.log(clean, step=step)
             except Exception as exc:  # pragma: no cover - external service
-                # Final evaluation is logged at the best checkpoint's step,
-                # which can be earlier than the last step W&B has already
-                # consumed.  Retry without an explicit step so the metrics are
-                # still recorded instead of losing the whole run.
                 self.logger.warning(
                     "W&B logging with explicit step failed (%s); retrying without step.", exc
                 )
@@ -279,7 +215,6 @@ class Trainer:
                     self.wandb_logger = None
 
     def _log_epoch_progress(self, engine: Engine) -> None:
-        """Log learning rate, epoch, and global step once per epoch."""
         step = engine.state.iteration
         learning_rate = float(self.optimizer.param_groups[0]["lr"])
         self._log_scalars(
@@ -292,7 +227,6 @@ class Trainer:
         )
 
     def _run_periodic_id_eval(self, engine: Engine) -> None:
-        """Optional generation-based ID exact-match during training."""
         if idist.get_rank() != 0:
             return
         unwrapped_model: torch.nn.Module = self.model
@@ -325,23 +259,6 @@ class Trainer:
         )
 
     def _train_step(self, engine: Engine, batch: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
-        """Run a single training iteration: forward pass, loss, backward, optimizer step.
-
-        This is the function passed to the Ignite training ``Engine``.  Ignite calls it
-        once per batch and stores the returned dict as ``engine.state.output``, which
-        the attached metrics and loggers then read.
-
-        ``set_to_none=True`` in ``zero_grad`` frees gradient memory instead of filling
-        it with zeros, which is slightly faster and uses less memory.
-
-        ``loss.backward()`` and ``torch.nn.utils.clip_grad_norm_`` are used; Ignite
-        ``idist`` provides device placement and rank/barrier helpers.
-
-        The tensors in the returned dict are ``detach()``-ed so that the compute graph
-        is released before they are consumed by metrics or loggers.
-
-        See: https://docs.pytorch.org/ignite/generated/ignite.engine.engine.Engine.html
-        """
         self.model.train()
         inputs = batch["input_ids"].to(self.device)
         targets = batch["labels"].to(self.device)
@@ -368,18 +285,6 @@ class Trainer:
 
     @torch.no_grad()
     def _eval_step(self, engine: Engine, batch: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
-        """Run a single evaluation iteration: forward pass only, no gradient tracking.
-
-        ``@torch.no_grad()`` disables gradient computation for the duration of this
-        call, reducing memory usage and speeding up evaluation.
-
-        ``loss`` is intentionally absent from the returned dict: the Ignite ``Loss``
-        metric recomputes it internally via its ``output_transform`` (``_flatten``),
-        ensuring the metric accumulates correctly over the full evaluation set rather
-        than averaging pre-computed batch losses.
-
-        See: https://docs.pytorch.org/ignite/generated/ignite.engine.engine.Engine.html
-        """
         self.model.eval()
         inputs = batch["input_ids"].to(self.device)
         targets = batch["labels"].to(self.device)
@@ -388,7 +293,6 @@ class Trainer:
             attention_mask = attention_mask.to(self.device)
         logits = self.model(inputs, attention_mask=attention_mask)
 
-        # Pad across processes along sequence dimension (dim=1) if variable lengths exist across ranks
         if idist.get_world_size() > 1:
             logits = logits
             targets = targets
@@ -398,15 +302,6 @@ class Trainer:
         return {"logits": logits, "targets": targets}
 
     def _run_evaluations(self, engine: Engine) -> None:
-        """Evaluate on the training and validation sets at the end of each epoch.
-
-        Triggered by ``Events.EPOCH_COMPLETED`` on the training engine.
-
-        The train evaluator is run with ``epoch_length=min(train, val)`` so that
-        the number of batches evaluated matches the validation set size.  This keeps
-        train and validation metrics comparable without running a full pass over the
-        (potentially much larger) training set every epoch.
-        """
         self.logger.info("Evaluating on training set...")
         self.train_evaluator.run(self.train_loader, epoch_length=min(len(self.train_loader), len(self.val_loader)))
         train_metrics = self.train_evaluator.state.metrics
@@ -439,13 +334,6 @@ class Trainer:
                     pass
 
     def test(self, test_loader: DataLoader | None = None) -> None:
-        """Evaluate the best checkpoint on ID (validation) and OOD (test) sets.
-
-        Exact-match accuracy is the primary metric; teacher-forced token
-        accuracy is the secondary metric.  Results are logged at the best
-        validation checkpoint's epoch/global step so they are not confused with
-        the final training step.
-        """
         idist.barrier()
         if idist.get_rank() != 0:
             return
@@ -545,21 +433,6 @@ class Trainer:
         )
 
     def _attach_metrics(self) -> dict[str, Metric]:
-        """Create and attach Ignite metrics to the trainer and evaluator engines.
-
-        Metrics are attached once and updated automatically by Ignite after each
-        iteration/epoch.  Three evaluators share the same metric definitions so
-        results are stored under separate keys (``train_*``, ``val_*``, ``test_*``).
-
-        ``RunningAverage`` computes a smoothed per-iteration loss for the training
-        engine so that fluctuations between batches are dampened in the logs.
-
-        ``Loss`` and ``Accuracy`` are epoch-level metrics computed over the full
-        evaluation set.  Both use ``_flatten`` as their ``output_transform`` so they
-        see only the non-ignored token positions.
-
-        See: https://docs.pytorch.org/ignite/metrics.html
-        """
         # Running average loss tracked per training iteration (logged in console)
         RunningAverage(output_transform=lambda output: output["loss"]).attach(self.trainer, "batch_loss")
 
@@ -567,7 +440,6 @@ class Trainer:
         def transform_fn(output):
             return _flatten(output, ignore_index=self.ignore_index)
 
-        # Evaluate language modeling with cross-entropy; router balancing is a training regularizer.
         eval_criterion = self.criterion.cross_entropy if self.requires_router_info else self.criterion
         metrics = {}
         for prefix, evaluator in [
@@ -587,13 +459,6 @@ class Trainer:
         return metrics
 
     def attach_inference_logger(self) -> None:
-        """Register the qualitative inference handler to run every N epochs.
-
-        ``Events.EPOCH_COMPLETED(every=N)`` is Ignite's event-filter syntax: it fires
-        the handler only on epochs that are a multiple of N, rather than every epoch.
-        The handler runs ``_log_inference`` on both the training and validation loaders
-        so you can compare model outputs on seen and unseen samples side by side.
-        """
         for loader, name in ((self.train_loader, "Train"), (self.val_loader, "Val")):
             self.trainer.add_event_handler(
                 Events.EPOCH_COMPLETED(every=self.inference_every_epochs),
@@ -605,7 +470,6 @@ class Trainer:
     def _log_text(self, tag: str, text: str, step: int) -> None:
         if self.exp_logger is None:
             return
-        # Both backends escape HTML/text in the caller; clearml uses report_text, TB uses markdown.
         if self.config.logger == "clearml":
             self.exp_logger.report_text(f"[{tag}] Step {step}:\n{text}")
         else:
@@ -622,10 +486,6 @@ class Trainer:
         total_samples = len(dataset)  # type: ignore
         num_samples = min(self.inference_num_samples, total_samples)
 
-        # Read generation prompts straight off the DatapointModel contract.
-        # ``source``/``target`` are the tokenizer-facing strings (LSB-first for
-        # this experiment), while ``original_source``/``original_target`` are
-        # the conventional MSB-first strings used for human-readable logs.
         prompt_ids_list: list[torch.Tensor] = []
         targets: list[str] = []
         sources: list[str] = []
@@ -643,18 +503,6 @@ class Trainer:
             reverse_for_display.append(lsd_first)
         self.model.eval()
 
-        # Left-pad the prompts (reverse -> pad_sequence -> reverse) so every
-        # sequence in the batch ends at the same position and the newly
-        # generated tokens line up in a single column.
-        #
-        # NOTE: this is safe for the default model because it uses rotary
-        # (relative) positions, where shifting the whole prompt right by the
-        # pad width preserves the distances between real tokens and the padding
-        # is masked out of attention. If you swap in a model with absolute or
-        # sinusoidal position embeddings indexed by slot, left-padding will
-        # offset every real token's position and silently degrade generation --
-        # you would then need to right-pad, or derive position_ids from the
-        # attention mask instead of using the raw slot index.
         batch_input_ids = (
             torch.nn.utils.rnn.pad_sequence(
                 [t.flip(0) for t in prompt_ids_list], batch_first=True, padding_value=pad_token_id
@@ -684,8 +532,6 @@ class Trainer:
             )
             for tokens in new_tokens
         ]
-        # Generated answer tokens are LSB-first; reverse them so the logged
-        # prediction matches the conventional MSB-first source/target.
         decoded_strs = [
             prediction[::-1] if reverse else prediction
             for prediction, reverse in zip(decoded_strs, reverse_for_display)
@@ -704,7 +550,6 @@ class Trainer:
         for idx, (source, target, prediction) in enumerate(zip(sources, targets, decoded_strs), 1):
             lines.append(f"Sample {idx}")
             for key, val in [("Prompt", source), ("Target", target), ("Prediction", prediction)]:
-                # Escape markup so TB markdown / clearml console don't swallow <, >, & in outputs.
                 val = html.escape(val.strip() or "(empty)", quote=False)
                 lines.append(f"  {key}:     {val}")
             lines.append("")
@@ -719,19 +564,6 @@ class Trainer:
         max_new_tokens: int,
         attention_mask: torch.Tensor,
     ) -> torch.Tensor:
-        """Generate text token IDs from prompt input_ids.
-
-        Expects a pre-padded tensor (B, S). The caller is responsible for
-        left-padding and providing an attention mask before calling this method.
-
-        Args:
-            input_ids: Prompt token IDs of shape (batch, seq_len).
-            max_new_tokens: Maximum number of new tokens to generate.
-            attention_mask: Optional attention mask of shape (batch, seq_len).
-        Returns:
-            Tensor containing the full token IDs (prompt + newly generated tokens)
-            of shape (batch, prompt_len + new_tokens).
-        """
         unwrapped_model = self.model
         unwrapped_model.eval()
 
@@ -742,13 +574,10 @@ class Trainer:
 
         for _ in range(max_new_tokens):
             logits = unwrapped_model(generated, attention_mask=attention_mask)
-            # Take the logits at the last position — this is the prediction for the next token
             next_token_logits = logits[:, -1, :]
             # Greedy decoding: pick the highest-probability token at each step
             next_token = torch.argmax(next_token_logits, dim=-1, keepdim=True)
             if eos_id is not None:
-                # If a sequence already ended (last token is EOS), keep emitting EOS
-                # so the sequence stays frozen while other sequences in the batch finish
                 eos_mask = generated[:, -1:].eq(eos_id)
                 next_token = torch.where(eos_mask, torch.tensor(eos_id, device=device), next_token)
             generated = torch.cat([generated, next_token], dim=-1)
@@ -760,9 +589,6 @@ class Trainer:
                 device=device,
             )
 
-            # Once a sequence has emitted EOS we keep re-emitting it (above) and
-            # mask the appended token out of attention, so a finished sequence
-            # stays frozen while the rest of the batch keeps generating.
             already_ended = generated[:, -2:-1].eq(eos_id)
             next_mask = torch.where(
                 already_ended,
