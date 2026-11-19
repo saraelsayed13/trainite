@@ -51,3 +51,6 @@ pytest.ini
 
 .vscode/*
 site/
+# Experiment artefacts (checkpoints, generated labels, logs)
+outputs/
+examples/*/outputs/
