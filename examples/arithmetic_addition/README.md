@@ -261,6 +261,6 @@ Because the SinAbacus configs use 8 layers and the RoPE configs use 4, a clean
 attribution of any OOD gain to the positional encoding requires retraining RoPE
 at 8 layers as described above.
 
-The Muon and zero-padding variants, and any separate reversed-operand
-experiment, are left untouched. This comparison deliberately uses LSB-first
+The zero-padding variant and any separate reversed-operand
+experiment are left untouched. This comparison deliberately uses LSB-first
 data for both models, as described above.
