@@ -1,5 +1,9 @@
 """Synthetic dataset for character-level arithmetic addition."""
 
+from typing import Any
+
+import torch
+from pydantic import BaseModel, ConfigDict
 import random
 
 from torch.utils.data import Dataset
@@ -99,3 +103,69 @@ class ArithmeticAdditionDataset(Dataset):
 
     def __getitem__(self, index):
         return self.samples[index]
+
+
+class DatapointModel(BaseModel):
+    """Contract for a causal-LM transformed item: training tensors + eval prompt."""
+
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    source: str
+    target: str
+    train_input_ids: torch.Tensor
+    train_label_ids: torch.Tensor
+    attention_mask: torch.Tensor
+    eval_input_ids: torch.Tensor
+
+
+class PromptCompletionTransform:
+    """Convert a raw arithmetic sample into training tensors.
+
+    The model is trained with next-token prediction on the target string and is
+    evaluated by generating the target from the prompt alone.  All prompt
+    positions (including the trailing SEP) are masked out of the loss, so only
+    target digits and EOS contribute.
+    """
+
+    def __init__(self, tokenizer: Any, ignore_index: int = -100) -> None:
+        self.tokenizer = tokenizer
+        self.ignore_index = ignore_index
+
+    def build_prompt(self, sample: dict[str, str]) -> list[int]:
+        """Token ids for the generation prompt: [bos] + source + [sep] (no target)."""
+        bos = self.tokenizer.bos_token_id
+        sep = self.tokenizer.sep_token_id
+        source_tokens = self.tokenizer(sample["source"], add_special_tokens=False)["input_ids"]
+        return [bos] + source_tokens + [sep]
+
+    def __call__(self, sample: dict[str, str]) -> DatapointModel:
+        source = sample["source"]
+        target = sample["target"]
+
+        eos = self.tokenizer.eos_token_id
+
+        prompt_ids = self.build_prompt(sample)
+        target_tokens = self.tokenizer(target, add_special_tokens=False)["input_ids"]
+
+        # Full sequence: prompt + target tokens + EOS
+        combined_input_ids = prompt_ids + target_tokens + [eos]
+
+        # input_ids is the sequence shifted right by 1 (teacher-forcing style)
+        input_ids = torch.tensor(combined_input_ids[:-1], dtype=torch.long)
+        # labels is the sequence shifted left by 1 (next-token prediction targets)
+        labels = torch.tensor(combined_input_ids[1:], dtype=torch.long)
+
+        # Mask the prompt portion of the (shifted) labels. labels = combined[1:],
+        # so the prompt spans len(prompt_ids) - 1 leading positions.
+        labels[: len(prompt_ids) - 1] = self.ignore_index
+
+        attention_mask = torch.ones(len(input_ids), dtype=torch.long)
+
+        return DatapointModel(
+            source=source,
+            target=target,
+            train_input_ids=input_ids,
+            train_label_ids=labels,
+            attention_mask=attention_mask,
+            eval_input_ids=torch.tensor(prompt_ids, dtype=torch.long),
+        )

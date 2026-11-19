@@ -33,7 +33,7 @@ data:
       split: train
       reverse_digits: true
     transform:
-      _target_: dataset_impl.prompt_completion.PromptCompletionTransform
+      _target_: dataset_impl.arithmetic_addition.PromptCompletionTransform
       ignore_index: -100
     dataloader:
       batch_size: 128
@@ -54,7 +54,7 @@ data:
       split: val
       reverse_digits: true
     transform:
-      _target_: dataset_impl.prompt_completion.PromptCompletionTransform
+      _target_: dataset_impl.arithmetic_addition.PromptCompletionTransform
       ignore_index: -100
     dataloader:
       batch_size: 128
@@ -73,7 +73,7 @@ data:
       split: test
       reverse_digits: true
     transform:
-      _target_: dataset_impl.prompt_completion.PromptCompletionTransform
+      _target_: dataset_impl.arithmetic_addition.PromptCompletionTransform
       ignore_index: -100
     dataloader:
       batch_size: 128
