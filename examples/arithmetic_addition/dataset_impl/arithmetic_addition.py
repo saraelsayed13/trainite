@@ -38,7 +38,7 @@ class ArithmeticAdditionDataset(Dataset):
     Each item is a dictionary with:
 
     * ``source`` / ``target``: the strings fed to the tokenizer (LSB-first when
-      ``reverse_digits=True``).
+      ``reverse_digits=True``, fixed-width zero-padded when ``pad_to_width=True``).
     * ``original_source`` / ``original_target``: the conventional MSB-first
       strings, kept for readable logs and reports.
     * ``operand_lengths``: ``(digits_a, digits_b)``, used for per-length
@@ -56,9 +56,12 @@ class ArithmeticAdditionDataset(Dataset):
         train_size: int = 10000,
         val_size: int = 1000,
         reverse_digits: bool = False,
+        pad_to_width: bool = False,
     ):
         if min_digits <= 0 or max_digits < min_digits:
             raise ValueError("Invalid operand digit range")
+        if pad_to_width and reverse_digits:
+            raise ValueError("pad_to_width and reverse_digits are separate formats; pick one")
         if split not in {"train", "val", "test"}:
             raise ValueError("split must be 'train', 'val', or 'test'")
         if train_size <= 0 or val_size <= 0:
@@ -82,6 +85,7 @@ class ArithmeticAdditionDataset(Dataset):
         self.seed = seed
         self.split = split
         self.reverse_digits = reverse_digits
+        self.pad_to_width = pad_to_width
 
         if split == "test":
             self.samples = self._generate_samples(size, seed)
@@ -103,7 +107,14 @@ class ArithmeticAdditionDataset(Dataset):
 
             original_source = f"{a}+{b}"
             original_target = str(a + b)
-            if self.reverse_digits:
+            if self.pad_to_width:
+                # Zero-pad experiment: every operand gets the same number of
+                # columns, and the answer gets one extra column for the carry.
+                width = self.max_digits
+                source = f"{str(a).zfill(width)}+{str(b).zfill(width)}"
+                target = original_target.zfill(width + 1)
+                digit_order = "msd_first"
+            elif self.reverse_digits:
                 source = f"{str(a)[::-1]}+{str(b)[::-1]}"
                 target = original_target[::-1]
                 digit_order = "lsd_first"

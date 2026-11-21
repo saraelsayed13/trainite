@@ -1,11 +1,17 @@
 # Arithmetic Addition: RoPE baseline vs. Abacus
 
+> **Reviewing this branch?** Start with [`REVIEW.md`](REVIEW.md). It maps the
+> four experiments (baseline, zero-pad, reversed, Abacus) to configs, code
+> changes, and recorded results.
+
 This example contains a controlled comparison between two decoder-only
 Transformers on synthetic multi-digit addition:
 
 | Experiment | Positional signal | Optimizer | Config |
 | --- | --- | --- | --- |
-| Baseline | RoPE (rotary relative positions) | AdamW | `config.yaml` |
+| Baseline (natural order) | RoPE (rotary relative positions) | AdamW | `config_baseline.yaml` |
+| Zero-pad | RoPE, fixed-width operands | AdamW | `config_zero_pad.yaml` |
+| Reversed | RoPE, LSB-first digits | AdamW | `config_reversed.yaml`, `config.yaml` |
 | SinAbacus | Sinusoidal Abacus digit-column embeddings | AdamW | `config_abacus.yaml` |
 
 There are three size/budget variants:
