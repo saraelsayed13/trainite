@@ -1,4 +1,4 @@
-﻿"""Synthetic dataset for character-level arithmetic addition.
+"""Synthetic dataset for character-level arithmetic addition.
 
 The samples follow the data format used by the Abacus paper
 (McLeish et al., 2024, https://arxiv.org/abs/2405.17399): numbers are written
@@ -24,21 +24,17 @@ from torch.utils.data import Dataset
 
 
 class ArithmeticAdditionDataset(Dataset):
-    """Generate addition problems with disjoint train/validation splits.
+    """Generate a flat, deterministic pool of addition problems.
 
-    For ``split="train"`` and ``split="val"``, samples are drawn from a single
-    pool of ``train_size + val_size`` unique problems and sliced, so the two
-    splits are disjoint by construction.  Both splits must be constructed with
-    the same ``seed``, digit range, and pool sizes.
-
-    For ``split="test"``, ``size`` samples are generated independently.  Use a
-    distinct seed and/or digit range (the OOD configs use 5-digit operands and
-    seed 200) to guarantee disjointness from train/val.
+    The dataset does not decide train/val/test membership.  It generates
+    ``size`` unique problems from ``seed``; the caller splits the pool for
+    train/val and builds a separate pool with a different digit range and seed
+    for the out-of-distribution test set.
 
     Each item is a dictionary with:
 
     * ``source`` / ``target``: the strings fed to the tokenizer (LSB-first when
-      ``reverse_digits=True``).
+      ``reverse_digits=True``, fixed-width zero-padded when ``pad_to_width=True``).
     * ``original_source`` / ``original_target``: the conventional MSB-first
       strings, kept for readable logs and reports.
     * ``operand_lengths``: ``(digits_a, digits_b)``, used for per-length
@@ -48,31 +44,17 @@ class ArithmeticAdditionDataset(Dataset):
 
     def __init__(
         self,
-        size: int | None = None,
+        size: int = 10000,
         min_digits: int = 2,
         max_digits: int = 4,
         seed: int = 42,
-        split: str = "train",
-        train_size: int = 10000,
-        val_size: int = 1000,
         reverse_digits: bool = False,
+        pad_to_width: bool = False,
     ):
         if min_digits <= 0 or max_digits < min_digits:
             raise ValueError("Invalid operand digit range")
-        if split not in {"train", "val", "test"}:
-            raise ValueError("split must be 'train', 'val', or 'test'")
-        if train_size <= 0 or val_size <= 0:
-            raise ValueError("train_size and val_size must be positive")
-
-        expected_size = {
-            "train": train_size,
-            "val": val_size,
-            "test": size if size is not None else 1000,
-        }[split]
-        if size is None:
-            size = expected_size
-        elif split != "test" and size != expected_size:
-            raise ValueError(f"size must be {expected_size} for split={split!r}")
+        if pad_to_width and reverse_digits:
+            raise ValueError("pad_to_width and reverse_digits are separate formats; pick one")
         if size <= 0:
             raise ValueError("size must be positive")
 
@@ -80,21 +62,32 @@ class ArithmeticAdditionDataset(Dataset):
         self.min_digits = min_digits
         self.max_digits = max_digits
         self.seed = seed
-        self.split = split
         self.reverse_digits = reverse_digits
-
-        if split == "test":
-            self.samples = self._generate_samples(size, seed)
-        else:
-            all_samples = self._generate_samples(train_size + val_size, seed)
-            self.samples = all_samples[:train_size] if split == "train" else all_samples[train_size:]
+        self.pad_to_width = pad_to_width
+        self.samples = self._generate_samples(size, seed)
 
     def _generate_samples(self, count: int, seed: int) -> list[dict[str, object]]:
         rng = random.Random(seed)
         samples: list[dict[str, object]] = []
         seen_sources: set[str] = set()
 
+        possible_values = 10**self.max_digits - 10 ** (self.min_digits - 1)
+        if count > possible_values**2:
+            raise ValueError(
+                f"Cannot generate {count} unique problems with "
+                f"{self.min_digits}-{self.max_digits} digits; only "
+                f"{possible_values**2} pairs exist."
+            )
+
+        max_attempts = max(10_000, count * 100)
+        attempts = 0
         while len(samples) < count:
+            attempts += 1
+            if attempts > max_attempts:
+                raise RuntimeError(
+                    f"Gave up after {max_attempts} attempts with {len(samples)}/{count} unique problems."
+                )
+
             digits_a = rng.randint(self.min_digits, self.max_digits)
             digits_b = rng.randint(self.min_digits, self.max_digits)
 
@@ -103,7 +96,14 @@ class ArithmeticAdditionDataset(Dataset):
 
             original_source = f"{a}+{b}"
             original_target = str(a + b)
-            if self.reverse_digits:
+            if self.pad_to_width:
+                # Zero-pad experiment: every operand gets the same number of
+                # columns, and the answer gets one extra column for the carry.
+                width = self.max_digits
+                source = f"{str(a).zfill(width)}+{str(b).zfill(width)}"
+                target = original_target.zfill(width + 1)
+                digit_order = "msd_first"
+            elif self.reverse_digits:
                 source = f"{str(a)[::-1]}+{str(b)[::-1]}"
                 target = original_target[::-1]
                 digit_order = "lsd_first"

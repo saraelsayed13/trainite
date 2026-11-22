@@ -4,7 +4,7 @@ preprocessor:
   charset: 0123456789+
 model:
   _target_: models.rope_transformer.RoPETransformerModel
-  collate_fn_target: models.rope_transformer.CausalLMCollateFn
+  collate_fn_target: models.causal_lm.CausalLMCollateFn
   hidden_size: 256
   num_layers: 4
   num_heads: 8
@@ -15,19 +15,16 @@ optimizer:
   _target_: torch.optim.AdamW
   lr: 0.001
 loss:
-  _target_: models.rope_transformer.CausalLMCrossEntropyLoss
+  _target_: models.causal_lm.CausalLMCrossEntropyLoss
   ignore_index: -100
 data:
   train:
     dataset:
       _target_: dataset_impl.arithmetic_addition.ArithmeticAdditionDataset
       size: 150000
-      train_size: 150000
-      val_size: 5000
       min_digits: 2
       max_digits: 6
       seed: 42
-      split: train
       reverse_digits: true
     transform:
       _target_: dataset_impl.arithmetic_addition.PromptCompletionTransform
@@ -43,12 +40,9 @@ data:
     dataset:
       _target_: dataset_impl.arithmetic_addition.ArithmeticAdditionDataset
       size: 5000
-      train_size: 150000
-      val_size: 5000
       min_digits: 2
       max_digits: 6
       seed: 42
-      split: val
       reverse_digits: true
     transform:
       _target_: dataset_impl.arithmetic_addition.PromptCompletionTransform
@@ -67,7 +61,6 @@ data:
       min_digits: 7
       max_digits: 12
       seed: 200
-      split: test
       reverse_digits: true
     transform:
       _target_: dataset_impl.arithmetic_addition.PromptCompletionTransform

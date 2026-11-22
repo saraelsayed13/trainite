@@ -29,7 +29,6 @@ from torch.utils.data import DataLoader, Dataset, random_split
 
 from config import (
     DataConfigBase,
-    DataWithAutoSplit,
     ProjectConfig,
 )
 from dataset_impl.transformed import TransformedDataset
@@ -81,14 +80,6 @@ def instantiate(config: BaseModel, **kwargs) -> Any:
     final_kwargs = _inject_if_accepted(target_symbol, **final_kwargs)
 
     return target_symbol(**final_kwargs)
-
-
-def load_yaml(path: str | Path) -> dict:
-    config_path = Path(path)
-    data = yaml.safe_load(config_path.read_text()) or {}
-    if not isinstance(data, dict):
-        raise ValueError("Config file must contain a mapping")
-    return data
 
 
 def dump_yaml(data: dict[str, object], path: str | Path) -> None:
@@ -154,58 +145,80 @@ def create_dataloader(
     return DataLoader(dataset, shuffle=shuffle, collate_fn=collate_fn, **dl_kwargs)
 
 
-def _loaders_from_splits(
+def build_split_datasets(
     data_config: DataConfigBase,
     tokenizer: Any,
-    collate_fn_target: str | None = None,
-) -> tuple[DataLoader, DataLoader, DataLoader | None]:
-
-    def _make(split_config: Any) -> DataLoader:
-        ds = build_dataset(split_config.dataset, split_config.transform, tokenizer)
-        return create_dataloader(ds, split_config.dataloader, tokenizer, collate_fn_target=collate_fn_target)
-
-    return _make(data_config.train), _make(data_config.val), _make(data_config.test) if data_config.test else None
-
-
-def _loaders_from_ratios(
-    data_config: DataWithAutoSplit,
-    tokenizer: Any,
     seed: int,
-    collate_fn_target: str | None = None,
-) -> tuple[DataLoader, DataLoader, DataLoader | None]:
-    dataset = build_dataset(data_config.dataset, data_config.transform, tokenizer)
-    total_len = len(dataset)  # type: ignore
-    if total_len == 0:
-        raise ValueError("Training dataset is empty. Cannot perform train/val/test split.")
-    val_ratio = data_config.val_ratio
-    test_ratio = data_config.test_ratio
-    train_len = int(total_len * (1.0 - test_ratio - val_ratio))
-    val_len = int(total_len * val_ratio)
-    test_len = total_len - train_len - val_len
-    train_ds, val_ds, test_ds = random_split(
-        dataset,
-        [train_len, val_len, test_len],
+) -> tuple[Dataset, Dataset, Dataset | None]:
+    """Return ``(train, val, test)`` with train/val drawn from one shared pool.
+
+    Train and validation share a single deterministic pool so they can never
+    overlap: ``random_split`` assigns disjoint indices.  The test dataset is
+    built separately because it is out-of-distribution (different digit
+    range/seed) and therefore cannot come from the same pool.
+    """
+
+    def _params(split_config: Any) -> dict[str, Any]:
+        params = split_config.dataset.model_dump()
+        params.pop("size", None)
+        return params
+
+    if _params(data_config.train) != _params(data_config.val):
+        raise ValueError("train and val datasets must share the same parameters (except size)")
+
+    n_train = data_config.train.dataset.size
+    n_val = data_config.val.dataset.size
+    pool_config = data_config.train.dataset.model_copy(update={"size": n_train + n_val})
+    pool = build_dataset(pool_config, data_config.train.transform, tokenizer)
+
+    train_ds, val_ds = random_split(
+        pool,
+        [n_train, n_val],
         generator=torch.Generator().manual_seed(seed),
     )
-    dl = data_config.dataloader
-    return (
-        create_dataloader(train_ds, dl, tokenizer, shuffle=True, collate_fn_target=collate_fn_target),
-        create_dataloader(val_ds, dl, tokenizer, shuffle=False, collate_fn_target=collate_fn_target),
-        create_dataloader(test_ds, dl, tokenizer, shuffle=False, collate_fn_target=collate_fn_target)
-        if test_len > 0
-        else None,
-    )
+
+    test_ds = None
+    if data_config.test is not None:
+        test_ds = build_dataset(data_config.test.dataset, data_config.test.transform, tokenizer)
+
+    return train_ds, val_ds, test_ds
 
 
 def build_dataloaders(
-    data_config: Any,
+    data_config: DataConfigBase,
     tokenizer: Any,
     seed: int,
     collate_fn_target: str | None = None,
 ) -> tuple[DataLoader, DataLoader, DataLoader | None]:
-    if isinstance(data_config, DataWithAutoSplit):
-        return _loaders_from_ratios(data_config, tokenizer, seed, collate_fn_target)
-    return _loaders_from_splits(data_config, tokenizer, collate_fn_target)
+    """Build train/val/test loaders using :func:`build_split_datasets`."""
+    train_ds, val_ds, test_ds = build_split_datasets(data_config, tokenizer, seed)
+
+    train_loader = create_dataloader(
+        train_ds,
+        data_config.train.dataloader,
+        tokenizer,
+        shuffle=True,
+        collate_fn_target=collate_fn_target,
+    )
+    val_loader = create_dataloader(
+        val_ds,
+        data_config.val.dataloader,
+        tokenizer,
+        shuffle=False,
+        collate_fn_target=collate_fn_target,
+    )
+
+    test_loader = None
+    if test_ds is not None:
+        test_loader = create_dataloader(
+            test_ds,
+            data_config.test.dataloader,
+            tokenizer,
+            shuffle=False,
+            collate_fn_target=collate_fn_target,
+        )
+
+    return train_loader, val_loader, test_loader
 
 
 def make_run_dir(output_config: Any) -> Path:
@@ -365,9 +378,7 @@ def setup_wandb_logging_safe(
         logger = setup_wandb_logging(**logging_kwargs, **init_kwargs)
     except Exception as exc:  # pragma: no cover - depends on external service
         if mode != "offline":
-            logging.getLogger("trainer").warning(
-                "W&B initialization failed (%s); retrying in offline mode.", exc
-            )
+            logging.getLogger("trainer").warning("W&B initialization failed (%s); retrying in offline mode.", exc)
             try:
                 init_kwargs["mode"] = "offline"
                 logger = setup_wandb_logging(**logging_kwargs, **init_kwargs)

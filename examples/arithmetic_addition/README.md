@@ -1,17 +1,24 @@
 # Arithmetic Addition: RoPE baseline vs. Abacus
 
+> **Reviewing this branch?** Start with [`REVIEW.md`](REVIEW.md). It maps the
+> four experiments (baseline, zero-pad, reversed, Abacus) to configs, code
+> changes, and recorded results.
+
 This example contains a controlled comparison between two decoder-only
 Transformers on synthetic multi-digit addition:
 
 | Experiment | Positional signal | Optimizer | Config |
 | --- | --- | --- | --- |
-| Baseline | RoPE (rotary relative positions) | AdamW | `config.yaml` |
+| Baseline (natural order) | RoPE (rotary relative positions) | AdamW | `config_baseline.yaml` |
+| Zero-pad | RoPE, fixed-width operands | AdamW | `config_zero_pad.yaml` |
+| Reversed | RoPE, LSB-first digits | AdamW | `config_reversed.yaml` (3L ablation), `config.yaml` (4L small) |
 | SinAbacus | Sinusoidal Abacus digit-column embeddings | AdamW | `config_abacus.yaml` |
 
-There are three size/budget variants:
+There are three size/budget variants, plus a smaller set of format ablations:
 
 | Variant | Configs | Train | OOD test | Epochs | Depth (RoPE / SinAbacus) | Use |
 | --- | --- | --- | --- | --- | --- | --- |
+| Format ablations | `config_baseline.yaml`, `config_zero_pad.yaml`, `config_reversed.yaml` | 2-4 / 50k | 5 / 1k | 300 | 3 / - | format checks |
 | Small | `config.yaml`, `config_abacus.yaml` | 2-6 / 100k | 7-10 / 2k | 300 | 4 / 8 | quick local runs |
 | Large | `config_large.yaml`, `config_abacus_large.yaml` | 2-6 / 200k | 7-12 / 5k | 150 | 4 / 8 | Modal / fast GPU |
 | Local | `config_large_local.yaml`, `config_abacus_local.yaml` | 2-6 / 150k | 7-12 / 5k | 150 | 4 / 8 | RTX 2050 |
@@ -21,37 +28,53 @@ dataset size, OOD range, and model width (128 for small, 256 for large/local).
 The local variant keeps the large width and OOD test but uses a 150k training
 pool and a 150-epoch budget.
 
-**Depth caveat.** The RoPE baseline stays at 4 layers (its original
-configuration, already trained), while the SinAbacus runs use 8 layers as
-requested. Depth is therefore a confound when comparing the two: any OOD gain
-cannot be attributed to the positional encoding alone. Width, heads, FFN,
-dropout, data, tokenizer, and optimizer schedule are otherwise matched. To make
-the comparison clean, retrain RoPE at 8 layers with
+The format ablations are a separate, smaller budget (128 wide, 3 layers, 50k
+training problems) used to isolate the digit-format change from model size.
+`Epochs` is the configured budget, not the number of epochs actually recorded:
+the baseline run used 20 and the zero-pad run 26 before being stopped.
+
+**Depth caveat.** The large RoPE control (`config_large_local.yaml`) stays at 4
+layers (its original configuration, already trained), while the SinAbacus runs
+use 8 layers as requested. Depth is therefore a confound when comparing the two:
+any OOD gain cannot be attributed to the positional encoding alone. Width, heads,
+FFN, dropout, data, tokenizer, and optimizer schedule are otherwise matched. To
+make the comparison clean, retrain RoPE at 8 layers with
 `config_large_local.yaml` after setting `model.num_layers: 8` (about 4h20m on
 the RTX 2050).
 
 ## Data and fairness
 
-The local dataset (`dataset_impl/arithmetic_addition.py`) writes operands and
-answers **least-significant digit first** (LSB-first / reversed). Reversal is
-required for Abacus: it makes the column id of an already-generated token
-independent of how many future digits will be generated. The same reversed
-format is used by the RoPE baseline, so the comparison is not confounded by
-data order.
+`dataset_impl/arithmetic_addition.py` has two independent format switches, both
+off by default:
 
-Splits:
+- **Natural order** (MSB-first, no switch): `config_baseline.yaml`.
+- **Fixed width**: `config_zero_pad.yaml` zero-pads each operand to
+  `max_digits` and the answer to `max_digits + 1`, so a carry always has a slot.
+- **Reversed** (LSB-first): `config_reversed.yaml` and the 4L small
+  `config.yaml` used as the RoPE control for the Abacus runs.
 
-- **Small configs**: 2-6 digit train/ID validation, generated from one pool with
-  `seed=42`, sliced into 100,000 train and 1,000 validation examples (disjoint);
-  OOD test is 7-10 digits (`seed=200`, 2,000 examples).
-- **Large configs**: the same 2-6 digit pool scaled to 200,000 train and 5,000
-  validation examples; OOD test is 7-12 digits (`seed=200`, 5,000 examples).
-- **Local configs**: the same setup with a 150,000-example training pool and
-  5,000 validation examples.
+Reversal is what the Abacus runs use: it makes the column id of an
+already-generated token independent of how many digits are still to come. Every
+SinAbacus run and its RoPE control use LSB-first, so the comparison is not
+confounded by digit order. The three format ablations deliberately vary the
+format instead, which is why they are a separate, smaller budget.
 
-The original (MSB-first) strings are kept as `original_source` /
-`original_target` metadata and only used for readable logs; all model inputs and
-metrics use the LSB-first representation.
+Splits: train and validation always come from **one** pool of unique problems,
+split with `random_split`, so the two sets cannot overlap.
+
+| Variant | Train / val | OOD test |
+| --- | --- | --- |
+| Format ablations | 50,000 / 1,000 from a 51k pool, 2-4 digits, `seed=42` | 5 digits, 1,000, `seed=200` |
+| Small | 100,000 / 1,000 from a 101k pool, 2-6 digits, `seed=42` | 7-10 digits, 2,000, `seed=200` |
+| Large | 200,000 / 5,000 from a 205k pool, 2-6 digits, `seed=42` | 7-12 digits, 5,000, `seed=200` |
+| Local | 150,000 / 5,000 from a 155k pool, 2-6 digits, `seed=42` | 7-12 digits, 5,000, `seed=200` |
+
+The test set is never carved out of that pool: it is built separately with a
+different digit range and seed, because it is meant to be out of distribution.
+
+The unmodified (MSB-first) strings are always kept as `original_source` /
+`original_target` metadata and used only for readable logs; the format switches
+change what the model sees, not what the logs show.
 
 ## Abacus implementation
 
@@ -247,8 +270,9 @@ Verified locally:
 - two identical seeded short runs produced identical losses for both models;
 - `evaluate.py` loads the best checkpoint, appends to `output.log`, and writes
   to the same TensorBoard directory/W&B run id;
-- the small baseline completed a full 300-epoch run on the RTX 2050 (ID exact
-  match 1.0000, 7-10 digit OOD token accuracy 0.3750);
+- the 4L small baseline completed a full 300-epoch run on the RTX 2050 with ID
+  exact match 1.0000; OOD accuracy then falls sharply with operand length (the
+  per-length breakdown is recorded in `REVIEW.md`);
 - measured RTX 2050 epoch times: 4x128 / 100k is ~19-21 s; 4x256 / 200k is
   ~75 s for the RoPE baseline and ~85 s for SinAbacus 8L. At 150k that is
   ~53 s and ~89 s respectively, so the local baseline takes ~2h12m and the
@@ -261,6 +285,6 @@ Because the SinAbacus configs use 8 layers and the RoPE configs use 4, a clean
 attribution of any OOD gain to the positional encoding requires retraining RoPE
 at 8 layers as described above.
 
-The zero-padding variant and any separate reversed-operand
-experiment are left untouched. This comparison deliberately uses LSB-first
-data for both models, as described above.
+The zero-pad and reversed configs are format diagnostics, not part of the
+positional-encoding comparison; `REVIEW.md` lists all four experiments with their
+recorded numbers and the caveats around them.

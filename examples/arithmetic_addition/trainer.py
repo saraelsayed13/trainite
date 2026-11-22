@@ -43,7 +43,6 @@ def _flatten(output: dict[str, torch.Tensor], ignore_index: int = -100) -> tuple
 
 
 class Trainer:
-
     def __init__(self, config: ProjectConfig) -> None:
         self.logger: logging.Logger = setup_logger("trainer", level=logging.INFO)
         # Fix randomness for reproducibility across runs with the same seed
@@ -77,7 +76,6 @@ class Trainer:
         self.ignore_index: int = getattr(self.criterion, "ignore_index", -100)
         self.requires_router_info = getattr(self.criterion, "requires_router_info", False)
         self.train_forward_kwargs = {"return_router_info": True} if self.requires_router_info else {}
-
 
         self.total_iters: int = len(self.train_loader) * self.epochs
         self.trainer = Engine(self._train_step)
@@ -205,9 +203,7 @@ class Trainer:
             try:
                 self.wandb_logger.log(clean, step=step)
             except Exception as exc:  # pragma: no cover - external service
-                self.logger.warning(
-                    "W&B logging with explicit step failed (%s); retrying without step.", exc
-                )
+                self.logger.warning("W&B logging with explicit step failed (%s); retrying without step.", exc)
                 try:
                     self.wandb_logger.log(clean)
                 except Exception as retry_exc:  # pragma: no cover - external service
@@ -233,7 +229,7 @@ class Trainer:
         result = evaluate_exact_match(
             unwrapped_model,
             self.tokenizer,
-            self.config.data.val,
+            self.val_loader.dataset,
             self.device,
             max_new_tokens=self.max_inference_new_tokens,
             batch_size=self.trainer_config.eval_batch_size,
@@ -355,7 +351,7 @@ class Trainer:
 
         step = self.best_iteration or self.trainer.state.iteration
         epoch = self.best_epoch or self.trainer.state.epoch
-        collate_fn_target = self.config.model.collate_fn_target or "models.rope_transformer.CausalLMCollateFn"
+        collate_fn_target = self.config.model.collate_fn_target or "models.causal_lm.CausalLMCollateFn"
 
         metrics: dict[str, float] = {
             "progress/epoch": float(epoch),
@@ -366,7 +362,7 @@ class Trainer:
         id_result, id_token_accuracy = evaluate_split(
             unwrapped_model,
             self.tokenizer,
-            self.config.data.val,
+            self.val_loader.dataset,
             self.device,
             max_new_tokens=self.max_inference_new_tokens,
             collate_fn_target=collate_fn_target,
@@ -390,12 +386,11 @@ class Trainer:
         for source, target, prediction in id_result.wrong:
             self.logger.info("  ID wrong: %s = %s -> %s", source, target, prediction)
 
-        test_split = getattr(self.config.data, "test", None)
-        if test_split is not None:
+        if self.test_loader is not None:
             ood_result, ood_token_accuracy = evaluate_split(
                 unwrapped_model,
                 self.tokenizer,
-                test_split,
+                self.test_loader.dataset,
                 self.device,
                 max_new_tokens=self.max_inference_new_tokens,
                 collate_fn_target=collate_fn_target,

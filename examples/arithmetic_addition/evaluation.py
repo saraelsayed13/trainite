@@ -14,9 +14,9 @@ from dataclasses import dataclass, field
 from typing import Any
 
 import torch
-from torch.utils.data import DataLoader, Subset
+from torch.utils.data import DataLoader, Dataset, Subset
 
-from utils import build_dataset, create_dataloader
+from utils import get_target
 
 
 @dataclass
@@ -111,14 +111,13 @@ def _display_prediction(prediction: str, item: Any) -> str:
 def evaluate_exact_match(
     model: torch.nn.Module,
     tokenizer: Any,
-    split_config: Any,
+    dataset: Dataset,
     device: torch.device,
     max_new_tokens: int,
     batch_size: int = 128,
     max_examples: int | None = None,
 ) -> SplitEvaluation:
-    """Generate answers for a split and compute exact-match accuracy."""
-    dataset = build_dataset(split_config.dataset, split_config.transform, tokenizer)
+    """Generate answers for a dataset and compute exact-match accuracy."""
     n = len(dataset) if max_examples is None else min(len(dataset), max_examples)
 
     correct = 0
@@ -174,7 +173,7 @@ def evaluate_exact_match(
 def teacher_forced_token_accuracy(
     model: torch.nn.Module,
     tokenizer: Any,
-    split_config: Any,
+    dataset: Dataset,
     device: torch.device,
     collate_fn_target: str,
     batch_size: int = 128,
@@ -182,27 +181,19 @@ def teacher_forced_token_accuracy(
     max_examples: int | None = None,
 ) -> float:
     """Token-level next-token accuracy on non-ignored (answer) positions."""
-    dataset = build_dataset(split_config.dataset, split_config.transform, tokenizer)
     if max_examples is not None and max_examples < len(dataset):
         dataset = Subset(dataset, range(max_examples))
-    loader = create_dataloader(
+
+    collate_fn = None
+    if collate_fn_target:
+        target_symbol = get_target(collate_fn_target)
+        collate_fn = target_symbol(tokenizer=tokenizer) if isinstance(target_symbol, type) else target_symbol
+    loader = DataLoader(
         dataset,
-        split_config.dataloader,
-        tokenizer,
+        batch_size=batch_size,
         shuffle=False,
-        collate_fn_target=collate_fn_target,
+        collate_fn=collate_fn,
     )
-    # create_dataloader uses the split's batch size; rebuild if an override was
-    # requested so training and standalone evaluation can share this helper.
-    if loader.batch_size != batch_size:
-        collate_fn = loader.collate_fn
-        loader = DataLoader(
-            dataset,
-            batch_size=batch_size,
-            shuffle=False,
-            num_workers=split_config.dataloader.num_workers,
-            collate_fn=collate_fn,
-        )
 
     correct = 0
     total = 0
@@ -224,7 +215,7 @@ def teacher_forced_token_accuracy(
 def evaluate_split(
     model: torch.nn.Module,
     tokenizer: Any,
-    split_config: Any,
+    dataset: Dataset,
     device: torch.device,
     max_new_tokens: int,
     collate_fn_target: str,
@@ -235,7 +226,7 @@ def evaluate_split(
     exact = evaluate_exact_match(
         model,
         tokenizer,
-        split_config,
+        dataset,
         device,
         max_new_tokens=max_new_tokens,
         batch_size=batch_size,
@@ -244,7 +235,7 @@ def evaluate_split(
     token_accuracy = teacher_forced_token_accuracy(
         model,
         tokenizer,
-        split_config,
+        dataset,
         device,
         collate_fn_target=collate_fn_target,
         batch_size=batch_size,

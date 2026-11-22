@@ -259,72 +259,43 @@ class ArithmeticAdditionDatasetConfig(DatasetConfig):
         default="trainite.datasets.arithmetic_addition.ArithmeticAdditionDataset",
         alias="_target_",
     )
-    size: int | None = Field(default=None, gt=0)
+    size: int = Field(default=10000, gt=0)
     min_digits: int = Field(default=2, gt=0)
     max_digits: int = Field(default=4, gt=0)
     seed: int = 42
-    split: str = Field(default="train", pattern="^(train|val|test)$")
-    train_size: int = Field(default=10000, gt=0)
-    val_size: int = Field(default=1000, gt=0)
+    reverse_digits: bool = False
+    pad_to_width: bool = False
 
     @model_validator(mode="after")
     def validate_digit_range(self) -> Self:
         if self.min_digits > self.max_digits:
             raise ValueError("min_digits must be <= max_digits")
-        return self
-
-    @model_validator(mode="after")
-    def validate_size_matches_split(self) -> Self:
-        expected = {"train": self.train_size, "val": self.val_size}.get(self.split)
-        if expected is not None and self.size is not None and self.size != expected:
-            raise ValueError(f"size must be {expected} for split={self.split!r}")
+        if self.pad_to_width and self.reverse_digits:
+            raise ValueError("pad_to_width and reverse_digits are separate formats; pick one")
         return self
 
 
-class ArithmeticAdditionDataConfig(DataConfigBase):
-    train: SplitConfig = Field(
-        default_factory=lambda: SplitConfig(
-            dataset=ArithmeticAdditionDatasetConfig(
-                size=10000,
-                seed=42,
-                split="train",
-            ),
-            transform=PromptCompletionTransformConfig(),
-            dataloader=DataLoaderConfig(
-                batch_size=32,
-                shuffle=True,
-            ),
+class ArithmeticAdditionDataConfig(DataWithAutoSplit):
+    """Train/val/test drawn from one arithmetic pool by ratio.
+
+    One pool is generated once and split with ``random_split``, so the splits are
+    disjoint by construction and no split size is repeated in the config.  The
+    test split here is in-distribution; for an out-of-distribution test set
+    (longer operands), see ``examples/arithmetic_addition``, which builds a
+    separate 5-12 digit pool.
+    """
+
+    dataset: ArithmeticAdditionDatasetConfig = Field(default_factory=ArithmeticAdditionDatasetConfig)
+    transform: PromptCompletionTransformConfig = Field(
+        default_factory=lambda: PromptCompletionTransformConfig(
+            _target_="trainite.datasets.arithmetic_addition.PromptCompletionTransform"
         )
     )
-
-    val: SplitConfig = Field(
-        default_factory=lambda: SplitConfig(
-            dataset=ArithmeticAdditionDatasetConfig(
-                size=1000,
-                seed=42,
-                split="val",
-            ),
-            transform=PromptCompletionTransformConfig(),
-            dataloader=DataLoaderConfig(
-                batch_size=32,
-                shuffle=False,
-            ),
-        )
-    )
-
-    test: SplitConfig = Field(
-        default_factory=lambda: SplitConfig(
-            dataset=ArithmeticAdditionDatasetConfig(
-                size=1000,
-                min_digits=5,
-                max_digits=5,
-                seed=200,
-                split="test",
-            ),
-            transform=PromptCompletionTransformConfig(),
-            dataloader=DataLoaderConfig(
-                batch_size=128,
-                shuffle=False,
-            ),
+    test_ratio: float = 0.1
+    val_ratio: float = 0.1
+    dataloader: DataLoaderConfig = Field(
+        default_factory=lambda: DataLoaderConfig(
+            batch_size=32,
+            shuffle=True,
         )
     )

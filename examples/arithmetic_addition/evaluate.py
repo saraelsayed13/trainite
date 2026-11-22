@@ -33,13 +33,12 @@ from config import ProjectConfig
 from evaluation import evaluate_split
 from utils import (
     build_model,
+    build_split_datasets,
     instantiate,
     load_config,
     read_eval_context,
     resolve_wandb_mode,
 )
-
-BATCH_SIZE = 128
 
 
 def _setup_logger(run_dir: Path) -> logging.Logger:
@@ -85,8 +84,7 @@ def _resolve_checkpoint(config: ProjectConfig, args: argparse.Namespace) -> Path
     checkpoints = sorted(root.glob("*/best.pt"), key=lambda path: path.stat().st_mtime)
     if not checkpoints:
         raise FileNotFoundError(
-            f"No best.pt found under {root}. Train first with: "
-            f"./.venv/bin/python main.py {args.config}"
+            f"No best.pt found under {root}. Train first with: ./.venv/bin/python main.py {args.config}"
         )
     return checkpoints[-1]
 
@@ -236,23 +234,25 @@ def main() -> None:
         metrics["eval/best_val_loss"] = float(best_val_loss)
 
     max_new_tokens = config.trainer.max_inference_new_tokens
-    collate_fn_target = config.model.collate_fn_target or "models.rope_transformer.CausalLMCollateFn"
+    collate_fn_target = config.model.collate_fn_target or "models.causal_lm.CausalLMCollateFn"
 
-    for prefix, label, split_config in (
-        ("eval/id", "validation (ID)", config.data.val),
-        ("eval/ood", "test (OOD)", getattr(config.data, "test", None)),
+    _, val_dataset, test_dataset = build_split_datasets(config.data, tokenizer, config.seed)
+
+    for prefix, label, dataset in (
+        ("eval/id", "validation (ID)", val_dataset),
+        ("eval/ood", "test (OOD)", test_dataset),
     ):
-        if split_config is None:
+        if dataset is None:
             logger.warning("No %s split configured; skipping.", label)
             continue
         result, token_accuracy = evaluate_split(
             model,
             tokenizer,
-            split_config,
+            dataset,
             device,
             max_new_tokens=max_new_tokens,
             collate_fn_target=collate_fn_target,
-            batch_size=BATCH_SIZE,
+            batch_size=config.trainer.eval_batch_size,
             max_examples=args.max_examples,
         )
         metrics.update(_split_metrics(result, token_accuracy, prefix))

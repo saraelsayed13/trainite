@@ -108,9 +108,7 @@ def train_all(configs: list[str]) -> None:
     env.setdefault("WANDB_MODE", "offline")
 
     stop = threading.Event()
-    committer = threading.Thread(
-        target=_commit_periodically, args=(stop,), daemon=True
-    )
+    committer = threading.Thread(target=_commit_periodically, args=(stop,), daemon=True)
     committer.start()
 
     try:

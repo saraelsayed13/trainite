@@ -46,14 +46,9 @@ isolates the effect of the Abacus positional encoding.
 from __future__ import annotations
 
 import math
-from typing import Any
 
 import torch
 from torch import nn
-from torch.nn.utils.rnn import pad_sequence
-
-
-NON_DIGIT_INDEX = 0
 
 
 def compute_column_ids(
@@ -107,7 +102,6 @@ class AbacusEmbedding(nn.Module):
     def __init__(
         self,
         embedding_dim: int,
-        max_seq_len: int = 1024,
         max_offset: int = 100,
         digit_token_start: int = 5,
         num_digit_tokens: int = 10,
@@ -117,8 +111,6 @@ class AbacusEmbedding(nn.Module):
             raise ValueError("embedding_dim must be positive")
         if embedding_dim % 2 != 0:
             raise ValueError("embedding_dim must be even for sinusoidal Abacus encoding")
-        if max_seq_len <= 0:
-            raise ValueError("max_seq_len must be positive")
         if max_offset < 0:
             raise ValueError("max_offset must be non-negative")
         if num_digit_tokens <= 0 or digit_token_start < 0:
@@ -133,10 +125,7 @@ class AbacusEmbedding(nn.Module):
         # Shared learned vector for every non-digit token (column id 0).
         self.non_digit = nn.Parameter(torch.zeros(embedding_dim))
 
-        # Kept for API/config compatibility; the functional encoding has no
-        # table size limit, so max_seq_len is only validated, never indexed.
         self.embedding_dim = embedding_dim
-        self.max_seq_len = max_seq_len
         self.max_offset = max_offset
         self.digit_token_start = digit_token_start
         self.num_digit_tokens = num_digit_tokens
@@ -261,7 +250,6 @@ class AbacusTransformerModel(nn.Module):
         num_heads: int = 4,
         feedforward_dim: int = 512,
         dropout: float = 0.0,
-        max_seq_len: int = 1024,
         max_offset: int = 100,
         digit_token_start: int = 5,
         num_digit_tokens: int = 10,
@@ -272,7 +260,6 @@ class AbacusTransformerModel(nn.Module):
         self.embedding = nn.Embedding(vocab_size, hidden_size, padding_idx=pad_token_id)
         self.abacus = AbacusEmbedding(
             embedding_dim=hidden_size,
-            max_seq_len=max_seq_len,
             max_offset=max_offset,
             digit_token_start=digit_token_start,
             num_digit_tokens=num_digit_tokens,
@@ -281,10 +268,7 @@ class AbacusTransformerModel(nn.Module):
         self.num_digit_tokens = num_digit_tokens
         self.max_offset = max_offset
         self.blocks = nn.ModuleList(
-            [
-                TransformerBlock(hidden_size, num_heads, feedforward_dim, dropout)
-                for _ in range(num_layers)
-            ]
+            [TransformerBlock(hidden_size, num_heads, feedforward_dim, dropout) for _ in range(num_layers)]
         )
         self.proj = nn.Linear(hidden_size, vocab_size)
         self.norm = nn.LayerNorm(hidden_size)
@@ -328,64 +312,10 @@ class AbacusTransformerModel(nn.Module):
         return self.proj(x)
 
 
-class CausalLMCollateFn:
-    """Collate sequences for decoder-only autoregressive training.
-
-    Pads a batch of variable-length sequences to the same length using
-    *left*-padding.  Left-padding keeps all real tokens right-aligned, which is
-    compatible with a single causal mask for the whole batch.
-
-    The implementation flips each sequence, right-pads with ``pad_sequence``,
-    then flips the result back -- equivalent to left-padding.
-
-    ``ignore_index`` (-100 by default) is used for padded label positions so
-    that PyTorch's ``CrossEntropyLoss`` ignores them during training.
-    """
-
-    def __init__(self, tokenizer: Any) -> None:
-        self.tokenizer = tokenizer
-        pad_id = getattr(tokenizer, "pad_token_id", None)
-        self.pad_token_id = pad_id if pad_id is not None else 0
-        self.ignore_index = -100
-
-    def __call__(self, batch: list[Any]) -> dict[str, torch.Tensor]:
-        input_ids_list = []
-        attention_mask_list = []
-        labels_list = []
-        for item in batch:
-            input_ids_list.append(item.train_input_ids.flip(0))
-            labels_list.append(item.train_label_ids.flip(0))
-            attention_mask_list.append(item.attention_mask.flip(0))
-
-        padded_input_ids = pad_sequence(
-            input_ids_list,
-            batch_first=True,
-            padding_value=self.pad_token_id,
-        ).flip(1)
-        padded_attention_mask = pad_sequence(attention_mask_list, batch_first=True, padding_value=0).flip(1)
-        padded_labels = pad_sequence(labels_list, batch_first=True, padding_value=self.ignore_index).flip(1)
-
-        return {
-            "input_ids": padded_input_ids,
-            "attention_mask": padded_attention_mask,
-            "labels": padded_labels,
-        }
-
-
-class CausalLMCrossEntropyLoss(nn.CrossEntropyLoss):
-    """Cross-entropy for logits with vocabulary in the last dimension."""
-
-    def forward(self, logits: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
-        return super().forward(logits.reshape(-1, logits.size(-1)), labels.reshape(-1))
-
-
 __all__ = [
-    "NON_DIGIT_INDEX",
     "compute_column_ids",
     "AbacusEmbedding",
     "Attention",
     "TransformerBlock",
     "AbacusTransformerModel",
-    "CausalLMCollateFn",
-    "CausalLMCrossEntropyLoss",
 ]

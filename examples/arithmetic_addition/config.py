@@ -1,6 +1,6 @@
-from typing import Literal, Self
+from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class ModelConfig(BaseModel):
@@ -38,7 +38,7 @@ class OptimizerConfig(BaseModel):
 
 class LossConfig(BaseModel):
     model_config = ConfigDict(extra="allow", validate_assignment=True)
-    target: str = Field(alias="_target_", default="models.rope_transformer.CausalLMCrossEntropyLoss")
+    target: str = Field(alias="_target_", default="models.causal_lm.CausalLMCrossEntropyLoss")
     ignore_index: int = -100
 
 
@@ -61,24 +61,6 @@ class DataConfigBase(BaseModel):
     train: SplitConfig
     val: SplitConfig
     test: SplitConfig | None = None
-
-
-class DataWithAutoSplit(BaseModel):
-    model_config = ConfigDict(validate_assignment=True)
-    dataset: DatasetConfig
-    transform: TransformConfig | None = None
-    dataloader: DataLoaderConfig = Field(default_factory=DataLoaderConfig)
-    test_ratio: float = Field(default=0.2, ge=0.0, lt=0.5)
-    val_ratio: float = Field(default=0.1, gt=0.0, lt=0.3)
-
-    @model_validator(mode="after")
-    def check_split_ratios(self) -> Self:
-        train_ratio = 1.0 - self.test_ratio - self.val_ratio
-        if train_ratio <= 0.5:
-            raise ValueError("train ratio (1.0 - test_ratio - val_ratio) must be greater than 0.5")
-        if train_ratio > 0.9:
-            raise ValueError("train ratio (1.0 - test_ratio - val_ratio) must be less than or equal to 0.9")
-        return self
 
 
 class TrainerConfig(BaseModel):
@@ -121,7 +103,7 @@ class ProjectConfig(BaseModel):
     model: ModelConfig
     optimizer: OptimizerConfig = Field(default_factory=OptimizerConfig)
     loss: LossConfig = Field(default_factory=LossConfig)
-    data: DataConfigBase | DataWithAutoSplit
+    data: DataConfigBase
     trainer: TrainerConfig = Field(default_factory=TrainerConfig)
     output: OutputConfig
     logger: Literal["tensorboard", "clearml"] = "tensorboard"
